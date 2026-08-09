@@ -17,56 +17,91 @@ async def analyze_fao_cpi(file: UploadFile = File(...)):
         contents = await file.read()
         raw_df = pd.read_csv(BytesIO(contents))
 
-        # Extract items
-        items = raw_df["Item"].dropna().unique().tolist() if "Item" in raw_df.columns else []
+        # 1. Flexible Column Mapping (Normalize column names)
+        col_map = {col.lower().strip(): col for col in raw_df.columns}
+        
+        item_col = col_map.get("item", None)
+        year_col = col_map.get("year", None)
+        val_col = col_map.get("value", None)
+        
+        if not year_col or not val_col:
+            return JSONResponse(
+                status_code=400, 
+                content={"error": f"CSV missing required columns ('Year', 'Value'). Found: {list(raw_df.columns)}"}
+            )
+
+        # 2. Extract Items/Categories
+        items = raw_df[item_col].dropna().unique().tolist() if item_col else []
 
         if "Food Indices" in items:
-            df = raw_df[raw_df["Item"] == "Food Indices"].copy()
+            df = raw_df[raw_df[item_col] == "Food Indices"].copy()
         elif items:
-            df = raw_df[raw_df["Item"] == items[0]].copy()
+            df = raw_df[raw_df[item_col] == items[0]].copy()
         else:
             df = raw_df.copy()
 
-        # Clean numeric columns
-        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
-        df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
+        # 3. Clean Numeric Values
+        df["Year"] = pd.to_numeric(df[year_col], errors="coerce")
+        df["Value"] = pd.to_numeric(df[val_col], errors="coerce")
 
-        # Decode Month Codes
-        if "Months Code" in df.columns:
-            df["Months Code"] = pd.to_numeric(df["Months Code"], errors="coerce")
-            df["Month"] = df["Months Code"] - 7000
-        elif "Month" in df.columns:
-            df["Month"] = pd.to_numeric(df["Month"], errors="coerce")
+        # 4. Smart Month Resolution
+        if "months code" in col_map:
+            # FAOSTAT Codes (e.g., 7001=Jan, 7012=Dec)
+            m_code = pd.to_numeric(df[col_map["months code"]], errors="coerce")
+            df["Month"] = m_code.apply(
+                lambda x: x - 7000 if 7001 <= x <= 7012 else (x if 1 <= x <= 12 else np.nan)
+            )
+        elif "months" in col_map:
+            # Full month names ("January") or abbreviations ("Jan")
+            months_series = df[col_map["months"]].astype(str).str.strip()
+            df["Month"] = pd.to_datetime(months_series, format="%B", errors="coerce").dt.month
+            
+            # Fallback to short month names if %B fails
+            if df["Month"].isna().all():
+                df["Month"] = pd.to_datetime(months_series, format="%b", errors="coerce").dt.month
+            # Fallback to direct numbers
+            if df["Month"].isna().all():
+                df["Month"] = pd.to_numeric(months_series, errors="coerce")
+        elif "month" in col_map:
+            df["Month"] = pd.to_numeric(df[col_map["month"]], errors="coerce")
+        else:
+            # Fallback if annual dataset without months
+            df["Month"] = 1
 
-        # Drop invalid rows and sort
+        # 5. Drop Invalid Rows and Sort Chronologically
         df = df.dropna(subset=["Year", "Month", "Value"])
+        df = df[(df["Month"] >= 1) & (df["Month"] <= 12)]
         df = df.sort_values(by=["Year", "Month"]).reset_index(drop=True)
 
         if df.empty:
-            return JSONResponse(status_code=400, content={"error": "No valid data rows found in CSV."})
+            return JSONResponse(
+                status_code=400, 
+                content={"error": "No valid monthly records found in the uploaded file."}
+            )
 
-        # Build Datetime
+        # 6. Build Datetime Column
         df["Date"] = pd.to_datetime(
             df["Year"].astype(int).astype(str) + "-" + df["Month"].astype(int).astype(str) + "-01",
             errors="coerce"
         )
         df = df.dropna(subset=["Date"])
 
-        # Calculate MoM Growth
+        # 7. Calculate Month-over-Month Growth Rate %
         df["MoM_Growth"] = (df["Value"].pct_change() * 100).fillna(0.0).round(2)
 
-        # Statistical Calculations safely
+        # 8. Statistical Summary
         min_val = sanitize_val(df["Value"].min())
         max_val = sanitize_val(df["Value"].max())
         avg_val = sanitize_val(df["Value"].mean())
         avg_growth = sanitize_val(df["MoM_Growth"].mean())
 
-        # Peak Spike calculation
+        # Peak Inflation Spike
         max_spike_idx = df["MoM_Growth"].idxmax()
         max_spike_row = df.loc[max_spike_idx]
         spike_label = max_spike_row["Date"].strftime("%B %Y")
         spike_val = sanitize_val(max_spike_row["MoM_Growth"])
 
+        # 9. JSON Output Formatting
         records = []
         for _, row in df.iterrows():
             records.append({

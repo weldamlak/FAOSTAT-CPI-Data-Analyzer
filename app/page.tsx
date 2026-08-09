@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, ChangeEvent } from "react";
 import {
   LineChart,
   Line,
@@ -12,13 +12,42 @@ import {
 } from "recharts";
 import { Upload, CheckCircle, TrendingUp, AlertTriangle, Table } from "lucide-react";
 
-export default function Home() {
-  const [loading, setLoading] = useState(false);
-  const [data, setData] = useState(null);
-  const [fileName, setFileName] = useState("");
+interface RecordItem {
+  Year: number;
+  Month: number;
+  Date: string;
+  Label: string;
+  Value: number;
+  MoM_Growth: number;
+}
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
+interface SummaryData {
+  total_months: number;
+  min_cpi: number;
+  max_cpi: number;
+  avg_cpi: number;
+  avg_monthly_growth: number;
+  peak_spike: {
+    label: string;
+    growth_percentage: number;
+  };
+}
+
+interface ApiResponse {
+  items_available: string[];
+  selected_item: string;
+  summary: SummaryData;
+  records: RecordItem[];
+  error?: string;
+}
+
+export default function Home() {
+  const [loading, setLoading] = useState<boolean>(false);
+  const [data, setData] = useState<ApiResponse | null>(null);
+  const [fileName, setFileName] = useState<string>("");
+
+  const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
     if (!file) return;
 
     setFileName(file.name);
@@ -28,19 +57,22 @@ export default function Home() {
     formData.append("file", file);
 
     try {
-      // Relative path works both locally and on Vercel
       const res = await fetch("/api/analyze-fao-cpi", {
         method: "POST",
         body: formData,
       });
 
-      if (!res.ok) throw new Error("Processing failed");
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || "Processing failed");
+      }
 
-      const result = await res.json();
+      const result: ApiResponse = await res.json();
       setData(result);
-    } catch (error) {
+    } catch (error: unknown) {
       console.error("Error communicating with Python API:", error);
-      alert("Failed to analyze dataset. Ensure backend server is running.");
+      const msg = error instanceof Error ? error.message : "Failed to analyze dataset";
+      alert(msg);
     } finally {
       setLoading(false);
     }
@@ -96,7 +128,7 @@ export default function Home() {
 
         {/* DASHBOARD DISPLAY */}
         {data && !loading && (
-          <div className="space-y-8 animate-fade-in">
+          <div className="space-y-8">
             
             {/* KPI STAT CARDS */}
             <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -146,7 +178,7 @@ export default function Home() {
                     <Tooltip
                       content={({ active, payload }) => {
                         if (active && payload && payload.length) {
-                          const record = payload[0].payload;
+                          const record = payload[0].payload as RecordItem;
                           return (
                             <div className="bg-slate-900 text-white p-3 rounded-lg text-xs space-y-1 shadow-lg">
                               <p className="font-bold border-b border-slate-700 pb-1">{record.Label}</p>

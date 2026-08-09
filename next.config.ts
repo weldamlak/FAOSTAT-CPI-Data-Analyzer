@@ -2,7 +2,6 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   async rewrites() {
-    // Only route to localhost during local development
     if (process.env.NODE_ENV === "development") {
       return [
         {
